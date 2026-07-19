@@ -9,15 +9,15 @@ load_dotenv()
 _cache = {}
 _CACHE_DURATION = 30  # seconds
 
-# Optional CoinGecko Demo API Key (for higher rate limits)
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 
+
 def get_crypto_price(symbol: str = "bitcoin"):
-    """Get crypto price with caching + stale fallback + optional API key"""
+    """Fetch crypto price with 30s caching + stale fallback + secure header auth"""
     symbol = symbol.lower()
     now = datetime.now()
 
-    # Check cache
+    # Check for valid cache
     if symbol in _cache:
         cached_time, cached_data = _cache[symbol]
         age = (now - cached_time).total_seconds()
@@ -28,18 +28,20 @@ def get_crypto_price(symbol: str = "bitcoin"):
             result["cache_age_seconds"] = round(age, 1)
             return result
 
-        # Keep stale data as fallback
+        # Keep stale data for fallback
         stale_data = cached_data.copy()
     else:
         stale_data = None
 
-    # Build URL (with API key if available)
+    # Build request
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
+    headers = {"accept": "application/json"}
+
     if COINGECKO_API_KEY:
-        url += f"&x_cg_demo_api_key={COINGECKO_API_KEY}"
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
 
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
 

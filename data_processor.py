@@ -13,11 +13,11 @@ COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 
 
 def get_crypto_price(symbol: str = "bitcoin"):
-    """Fetch crypto price with 30s caching + stale fallback + secure header auth"""
-    symbol = symbol.lower()
+    """Fetch price with caching, stale fallback, and defensive error handling"""
+    symbol = symbol.lower().strip()
     now = datetime.now()
 
-    # Check for valid cache
+    # Check cache
     if symbol in _cache:
         cached_time, cached_data = _cache[symbol]
         age = (now - cached_time).total_seconds()
@@ -28,7 +28,6 @@ def get_crypto_price(symbol: str = "bitcoin"):
             result["cache_age_seconds"] = round(age, 1)
             return result
 
-        # Keep stale data for fallback
         stale_data = cached_data.copy()
     else:
         stale_data = None
@@ -45,6 +44,22 @@ def get_crypto_price(symbol: str = "bitcoin"):
         response.raise_for_status()
         data = response.json()
 
+        # === DEFENSIVE CHECK ===
+        if not data or symbol not in data or "usd" not in data[symbol]:
+            # Invalid symbol or empty response from CoinGecko
+            if stale_data:
+                stale_data["cached"] = True
+                stale_data["cache_age_seconds"] = round((now - cached_time).total_seconds(), 1)
+                stale_data["note"] = "Serving stale data - invalid or unsupported symbol"
+                return stale_data
+
+            return {
+                "error": f"Symbol '{symbol}' not found or no price data available",
+                "symbol": symbol.upper(),
+                "cached": False,
+                "cache_age_seconds": 0
+            }
+
         price = data[symbol]["usd"]
 
         result = {
@@ -60,7 +75,6 @@ def get_crypto_price(symbol: str = "bitcoin"):
         return result
 
     except Exception as e:
-        # Fallback to stale cache if available
         if stale_data:
             stale_data["cached"] = True
             stale_data["cache_age_seconds"] = round((now - cached_time).total_seconds(), 1)

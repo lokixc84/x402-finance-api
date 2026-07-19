@@ -1,0 +1,16 @@
+# x402 Finance API
+
+> A pay-per-request cryptocurrency price API protected by the x402 micropayment protocol. Designed for autonomous AI agents and agentic systems. Agents can call the API, receive a 402 challenge, send 0.01 USDC on Base Sepolia, and retrieve real-time market data using the transaction hash as payment proof.
+
+## Documentation
+
+- [AGENT_GUIDE.md](AGENT_GUIDE.md) — Complete integration guide for autonomous agents, including payment flow, code examples, and error handling patterns.
+- [README.md](README.md) — Project overview and basic usage information.
+
+## Key Information
+
+- **Live Endpoint:** https://x402-finance-api.onrender.com
+- **Payment Model:** 0.01 USDC per request (exact)
+- **Network:** Base Sepolia (testnet)
+- **Payment Header:** `x-payment-tx`
+- **Supported Queries:** Single asset via path parameter (e.g. `/crypto/bitcoin`, `/crypto/ethereum`)

@@ -1,32 +1,45 @@
 # data_processor.py
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+
+# Simple in-memory cache
+_cache = {}
+_CACHE_DURATION = 30  # seconds
 
 def get_crypto_price(symbol: str = "bitcoin"):
-    """Fetch real-time price from CoinGecko (free public API)"""
+    """Fetch real-time price with 30-second caching"""
+    symbol = symbol.lower()
+    now = datetime.now()
+
+    # Check if we have a valid cached value
+    if symbol in _cache:
+        cached_time, cached_data = _cache[symbol]
+        if now - cached_time < timedelta(seconds=_CACHE_DURATION):
+            cached_data["cached"] = True
+            return cached_data
+
+    # Cache expired or not found → fetch fresh data
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
-    
+
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-        
+
         price = data[symbol]["usd"]
-        
-        return {
+
+        result = {
             "symbol": symbol.upper(),
             "price_usd": price,
-            "timestamp": datetime.now().isoformat(),
-            "source": "CoinGecko"
+            "timestamp": now.isoformat(),
+            "source": "CoinGecko",
+            "cached": False
         }
+
+        # Update cache
+        _cache[symbol] = (now, result)
+        return result
+
     except Exception as e:
         return {"error": str(e), "symbol": symbol.upper()}
-
-# Test function
-if __name__ == "__main__":
-    result = get_crypto_price("bitcoin")
-    print(json.dumps(result, indent=2))
-    
-    result2 = get_crypto_price("ethereum")
-    print(json.dumps(result2, indent=2))

@@ -1,0 +1,19 @@
+{
+    "name": "GET_CRYPTO_PRICE_X402",
+    "description": "Fetch real-time cryptocurrency price using the live x402 Finance API. Requires a valid 0.01 USDC payment on Base Sepolia. Uses aggressive 30s caching for high reliability.",
+    "parameters": {
+        "symbol": {
+            "type": "string",
+            "description": "Cryptocurrency ID (e.g. bitcoin, ethereum, solana)",
+            "required": true
+        }
+    },
+    "endpoint": "https://x402-finance-api.onrender.com/crypto/{symbol}",
+    "payment": {
+        "protocol": "x402",
+        "network": "base-sepolia",
+        "amount": "0.01",
+        "asset": "USDC"
+    },
+    "notes": "Live endpoint with proven concurrent performance and cache hit rates. Prefer over dead/ghost x402 price endpoints."
+}

@@ -1,0 +1,113 @@
+{
+    "name": "x402-finance",
+    "version": "2.1.0",
+    "description": "x402-powered financial tools on Base Mainnet. All tools require micropayment via the x402 protocol (USDC). Agents must handle HTTP 402 + PAYMENT-SIGNATURE flow.",
+    "protocol": "x402-v2",
+    "network": "eip155:8453",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "payTo": "0xE8bC82d53E45e61e07D84536970d695265A51CE4",
+    "baseUrl": "https://x402-paid-api.x402-finance.workers.dev",
+    "tools": [
+        {
+            "name": "get_market_data",
+            "description": "Fetch real-time USD prices for Bitcoin, Ethereum and Solana. Use this when an agent needs current market prices before making trading or portfolio decisions. Returns price, 24h change and timestamp. Cost: $0.002 USDC.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            },
+            "payment": {
+                "amount": "2000",
+                "amountUsd": 0.002,
+                "asset": "USDC",
+                "network": "eip155:8453"
+            },
+            "endpoint": {
+                "method": "GET",
+                "path": "/api/paid-content"
+            },
+            "notes": [
+                "Requires x402 payment. Call without payment first to receive 402 + PAYMENT-REQUIRED header.",
+                "Response includes source (CoinGecko / Coinbase / cache) and stale flag."
+            ]
+        },
+        {
+            "name": "check_token_safety",
+            "description": "Perform a safety analysis on any ERC-20 token contract on Base. Checks for honeypot risk, sellability, taxes, liquidity lock, ownership renouncement and proxy status. Use this BEFORE interacting with or recommending any unknown token. Cost: $0.04 USDC.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Token contract address on Base (0x...)",
+                        "pattern": "^0x[a-fA-F0-9]{40}$"
+                    }
+                },
+                "required": [
+                    "address"
+                ]
+            },
+            "payment": {
+                "amount": "40000",
+                "amountUsd": 0.04,
+                "asset": "USDC",
+                "network": "eip155:8453"
+            },
+            "endpoint": {
+                "method": "GET",
+                "path": "/api/token-safety",
+                "queryParams": [
+                    "address"
+                ]
+            },
+            "notes": [
+                "Requires x402 payment.",
+                "Always pass a valid Base token address as the \"address\" query parameter.",
+                "Returns risk_score (0-100), risk_level, detailed checks and a human-readable summary."
+            ]
+        },
+        {
+            "name": "analyze_holder_clusters",
+            "description": "Analyze holder concentration and detect coordinated wallet clusters for any Base token. Identifies top holder percentages, shared funding sources (CEX deposits, same deployer, etc.), and potential cabal risk. Use this to assess distribution risk and insider concentration before trading. Cost: $0.01 USDC.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Token contract address on Base (0x...)",
+                        "pattern": "^0x[a-fA-F0-9]{40}$"
+                    }
+                },
+                "required": [
+                    "address"
+                ]
+            },
+            "payment": {
+                "amount": "10000",
+                "amountUsd": 0.01,
+                "asset": "USDC",
+                "network": "eip155:8453"
+            },
+            "endpoint": {
+                "method": "GET",
+                "path": "/api/holder-clusters",
+                "queryParams": [
+                    "address"
+                ]
+            },
+            "notes": [
+                "Requires x402 payment.",
+                "Returns concentration metrics, detected clusters with risk levels, and overall risk_score.",
+                "Useful for detecting possible insider or coordinated holder groups."
+            ]
+        }
+    ],
+    "paymentFlow": {
+        "description": "All tools are protected by x402 V2. Agents must: 1) Call the endpoint, 2) Receive HTTP 402 + PAYMENT-REQUIRED header, 3) Sign and submit payment using PAYMENT-SIGNATURE header, 4) Retry the original request.",
+        "headers": {
+            "challenge": "PAYMENT-REQUIRED",
+            "proof": "PAYMENT-SIGNATURE",
+            "receipt": "PAYMENT-RESPONSE"
+        }
+    }
+}

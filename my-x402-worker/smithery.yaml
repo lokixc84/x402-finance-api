@@ -1,0 +1,64 @@
+# smithery.yaml
+name: x402-finance
+displayName: x402 Finance
+description: >
+  Live market data, token safety analysis, and holder cluster detection on Base Mainnet.
+  All tools are protected by the x402 micropayment protocol (USDC).
+  Agents must handle the HTTP 402 + PAYMENT-SIGNATURE flow.
+homepage: https://x402-paid-api.x402-finance.workers.dev
+documentation: https://x402-paid-api.x402-finance.workers.dev/llms.txt
+
+# MCP Server configuration
+mcp:
+  type: http
+  url: https://x402-paid-api.x402-finance.workers.dev/mcp-tools.json
+
+# Protocol details
+protocol: x402-v2
+network: eip155:8453
+asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"   # USDC on Base
+payTo: "0xE8bC82d53E45e61e07D84536970d695265A51CE4"
+
+tools:
+  - name: get_market_data
+    description: Real-time BTC, ETH and SOL prices
+    path: /api/paid-content
+    method: GET
+    price:
+      amount: "2000"
+      usd: 0.002
+      asset: USDC
+  - name: check_token_safety
+    description: Honeypot, tax, liquidity and ownership analysis for any Base token
+    path: /api/token-safety
+    method: GET
+    price:
+      amount: "40000"
+      usd: 0.04
+      asset: USDC
+    parameters:
+      - name: address
+        type: string
+        required: true
+        description: Token contract address on Base (0x...)
+  - name: analyze_holder_clusters
+    description: Holder concentration and coordinated wallet cluster analysis
+    path: /api/holder-clusters
+    method: GET
+    price:
+      amount: "10000"
+      usd: 0.01
+      asset: USDC
+    parameters:
+      - name: address
+        type: string
+        required: true
+        description: Token contract address on Base (0x...)
+
+# Important notes for agent developers
+notes: |
+  All tools require payment via the x402 protocol.
+  1. Call the endpoint -> receive HTTP 402 + PAYMENT-REQUIRED header
+  2. Sign the payment payload
+  3. Retry the request with the PAYMENT-SIGNATURE header
+  See /llms.txt for full documentation.

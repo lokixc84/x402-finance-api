@@ -1,0 +1,11 @@
+{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+        "name": "check_token_safety",
+        "arguments": {
+            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        }
+    }
+}

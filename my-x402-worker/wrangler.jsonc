@@ -1,0 +1,14 @@
+{
+  "name": "x402-paid-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-20",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // Public variables (safe to commit)
+  "vars": {
+    "ENVIRONMENT": "production"
+  }
+  // Secrets must be set with:
+  // npx wrangler secret put FACILITATOR_PRIVATE_KEY
+}

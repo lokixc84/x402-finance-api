@@ -79,7 +79,6 @@ function createChallenge(resource: string, amount: string, description: string, 
     ]
   }
 
-  // Only add Bazaar metadata for the market data endpoint
   if (includeBazaar) {
     challenge.extensions = {
       bazaar: {
@@ -197,6 +196,132 @@ function requireX402Payment(amount: string, description: string, includeBazaar =
 }
 
 // ======================================================
+// Token Safety (GoPlus + DexScreener)
+// ======================================================
+async function analyzeTokenSafety(address: string) {
+  const normalized = address.toLowerCase()
+  const headers = {
+    'User-Agent': 'x402-Finance-Worker/1.0',
+    Accept: 'application/json'
+  }
+
+  let goplus: any = null
+  let dex: any = null
+
+  try {
+    const res = await fetch(
+      `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=${normalized}`,
+      { headers, signal: AbortSignal.timeout(10000) }
+    )
+    if (res.ok) {
+      const json = await res.json()
+      goplus = json?.result?.[normalized] || null
+    } else {
+      console.warn('GoPlus status:', res.status)
+    }
+  } catch (e) {
+    console.warn('GoPlus failed', e)
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.dexscreener.com/tokens/v1/base/${normalized}`,
+      { headers, signal: AbortSignal.timeout(8000) }
+    )
+    if (res.ok) {
+      const pairs = await res.json()
+      if (Array.isArray(pairs) && pairs.length > 0) {
+        dex = pairs.sort(
+          (a: any, b: any) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
+        )[0]
+      }
+    }
+  } catch (e) {
+    console.warn('DexScreener failed', e)
+  }
+
+  if (!goplus && !dex) {
+    throw new Error('Token safety providers unavailable')
+  }
+
+  const isHoneypot = goplus?.is_honeypot === '1' || goplus?.is_honeypot === 1
+  const canSell = goplus?.cannot_sell_all !== '1' && goplus?.cannot_sell_all !== 1
+  const buyTax = parseFloat(goplus?.buy_tax ?? '0') || 0
+  const sellTax = parseFloat(goplus?.sell_tax ?? '0') || 0
+  const highTax = buyTax > 10 || sellTax > 10
+  const isProxy = goplus?.is_proxy === '1' || goplus?.is_proxy === 1
+  const isOpenSource = goplus?.is_open_source === '1' || goplus?.is_open_source === 1
+  const isMintable = goplus?.is_mintable === '1' || goplus?.is_mintable === 1
+  const ownerRenounced =
+    !goplus?.owner_address ||
+    goplus.owner_address === '0x0000000000000000000000000000000000000000' ||
+    goplus?.can_take_back_ownership === '0'
+
+  const liquidityUsd = dex?.liquidity?.usd ?? null
+  const liquidityLocked = goplus?.lp_holder_count
+    ? Number(goplus.lp_holder_count) > 0
+    : false
+
+  let risk = 10
+  if (isHoneypot) risk += 50
+  if (!canSell) risk += 25
+  if (highTax) risk += 15
+  if (isMintable) risk += 10
+  if (isProxy) risk += 5
+  if (!isOpenSource) risk += 8
+  if (liquidityUsd !== null && liquidityUsd < 5000) risk += 12
+  if (liquidityUsd !== null && liquidityUsd < 1000) risk += 10
+  risk = Math.min(100, risk)
+
+  const risk_level =
+    risk >= 70 ? 'High' : risk >= 40 ? 'Medium' : risk >= 20 ? 'Low-Medium' : 'Low'
+
+  return {
+    address: normalized,
+    chain: 'base',
+    chainId: 8453,
+    risk_score: risk,
+    risk_level,
+    checks: {
+      is_honeypot: !!isHoneypot,
+      can_sell: !!canSell,
+      high_tax: highTax,
+      buy_tax_pct: buyTax,
+      sell_tax_pct: sellTax,
+      liquidity_locked: !!liquidityLocked,
+      ownership_renounced: !!ownerRenounced,
+      proxy_contract: !!isProxy,
+      open_source: !!isOpenSource,
+      mintable: !!isMintable
+    },
+    liquidity: {
+      usd_value: liquidityUsd,
+      pair: dex?.quoteToken?.symbol || null,
+      dex: dex?.dexId || null,
+      pair_address: dex?.pairAddress || null,
+      volume_24h: dex?.volume?.h24 ?? null,
+      price_usd: dex?.priceUsd ? parseFloat(dex.priceUsd) : null
+    },
+    contract: {
+      verified: isOpenSource,
+      owner: goplus?.owner_address || null,
+      creator: goplus?.creator_address || null,
+      holder_count: goplus?.holder_count ? Number(goplus.holder_count) : null
+    },
+    summary: isHoneypot
+      ? 'High risk: token flagged as possible honeypot.'
+      : highTax
+        ? `Elevated risk: buy/sell tax ${buyTax}% / ${sellTax}%.`
+        : `Risk level ${risk_level}. Liquidity ~$${liquidityUsd != null ? Math.round(liquidityUsd) : 'n/a'}.`,
+    analyzed_at: new Date().toISOString(),
+    source: {
+      security: goplus ? 'GoPlus' : null,
+      market: dex ? 'DexScreener' : null
+    }
+  }
+}
+
+// ======================================================
 // Resilient Market Data
 // ======================================================
 async function getLiveCryptoPrices() {
@@ -206,7 +331,6 @@ async function getLiveCryptoPrices() {
     return { ...priceCache.data, cached: true, stale: false }
   }
 
-  // Primary: CoinGecko
   try {
     const res = await fetch(
       'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,virtual-protocol,aerodrome-finance,coinbase-wrapped-btc&vs_currencies=usd&include_24hr_change=true&include_last_updated_at=true',
@@ -283,7 +407,6 @@ async function getLiveCryptoPrices() {
     console.warn('CoinGecko failed', e)
   }
 
-  // Secondary: Coinbase
   try {
     const res = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD', {
       headers: { 'User-Agent': 'x402-Finance-Worker/1.0', Accept: 'application/json' },
@@ -320,7 +443,6 @@ async function getLiveCryptoPrices() {
     console.warn('Coinbase failed', e)
   }
 
-  // Tertiary: Cloudflare Cache
   try {
     const cached = await caches.default.match(CACHE_KEY)
     if (cached) {
@@ -329,7 +451,6 @@ async function getLiveCryptoPrices() {
     }
   } catch (e) { }
 
-  // Final fallback
   return {
     bitcoin: { usd: 65000, change_24h: null, last_updated: null },
     ethereum: { usd: 3400, change_24h: null, last_updated: null },
@@ -362,7 +483,7 @@ const MCP_TOOLS = [
   {
     name: 'check_token_safety',
     description:
-      'Analyze a Base token for honeypot risk, taxes, liquidity lock and ownership. Cost: $0.04 USDC via x402. COMING SOON – not accepting payments yet.',
+      'Analyze a Base token for honeypot risk, taxes, liquidity and ownership. Cost: $0.04 USDC via x402. LIVE.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -393,7 +514,7 @@ const MCP_TOOLS = [
   }
 ]
 
-const LIVE_MCP_TOOLS = new Set(['get_market_data'])
+const LIVE_MCP_TOOLS = new Set(['get_market_data', 'check_token_safety'])
 
 // ======================================================
 // MCP JSON-RPC Handler (POST /mcp)
@@ -426,7 +547,6 @@ app.post('/mcp', async (c) => {
     )
   }
 
-  // ---------- initialize ----------
   if (method === 'initialize') {
     return c.json({
       jsonrpc: '2.0',
@@ -438,18 +558,16 @@ app.post('/mcp', async (c) => {
         },
         serverInfo: {
           name: 'x402-finance',
-          version: '2.1.0'
+          version: '2.2.0'
         }
       }
     })
   }
 
-  // ---------- notifications/initialized ----------
   if (method === 'notifications/initialized') {
     return c.body(null, 204)
   }
 
-  // ---------- tools/list ----------
   if (method === 'tools/list') {
     return c.json({
       jsonrpc: '2.0',
@@ -460,7 +578,6 @@ app.post('/mcp', async (c) => {
     })
   }
 
-  // ---------- tools/call ----------
   if (method === 'tools/call') {
     const toolName = params?.name
     const args = params?.arguments || {}
@@ -473,7 +590,6 @@ app.post('/mcp', async (c) => {
       })
     }
 
-    // Map tool names (support both plain and namespaced)
     const cleanName = toolName.replace(/^x402-finance\./, '')
 
     const toolConfig: Record<string, { amount: string; description: string; needsAddress: boolean }> = {
@@ -503,19 +619,17 @@ app.post('/mcp', async (c) => {
       })
     }
 
-    // Block payments for tools that are not production-ready
     if (!LIVE_MCP_TOOLS.has(cleanName)) {
       return c.json({
         jsonrpc: '2.0',
         id,
         error: {
           code: -32000,
-          message: `${cleanName} is coming soon and is not accepting payments yet. Use get_market_data for live market data.`
+          message: `${cleanName} is coming soon and is not accepting payments yet. Use get_market_data or check_token_safety.`
         }
       })
     }
 
-    // Validate address when required
     if (config.needsAddress) {
       const address = args.address
       if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
@@ -529,10 +643,14 @@ app.post('/mcp', async (c) => {
 
     const paymentSignature = args.paymentSignature
 
-    // CASE 1: No payment yet → return structured challenge
     if (!paymentSignature) {
       const resource = `mcp:${cleanName}`
-      const challenge = createChallenge(resource, config.amount, config.description, cleanName === 'get_market_data')
+      const challenge = createChallenge(
+        resource,
+        config.amount,
+        config.description,
+        cleanName === 'get_market_data' || cleanName === 'check_token_safety'
+      )
 
       return c.json({
         jsonrpc: '2.0',
@@ -546,7 +664,12 @@ app.post('/mcp', async (c) => {
                 message: 'Payment required via x402. Sign the challenge and call the tool again with paymentSignature.',
                 challenge: challenge,
                 amount: config.amount,
-                amountUsd: '0.002',
+                amountUsd:
+                  cleanName === 'get_market_data'
+                    ? '0.002'
+                    : cleanName === 'check_token_safety'
+                      ? '0.04'
+                      : '0.01',
                 network: NETWORK,
                 asset: USDC_BASE,
                 payTo: PAY_TO
@@ -558,7 +681,6 @@ app.post('/mcp', async (c) => {
       })
     }
 
-    // CASE 2: Payment signature provided → verify + settle + execute
     try {
       let parsedPayload: any
       try {
@@ -569,7 +691,6 @@ app.post('/mcp', async (c) => {
 
       const requirements = createChallenge(`mcp:${cleanName}`, config.amount, config.description, true).accepts[0]
 
-      // Verify
       const verifyResult = await callFacilitator(c.env, '/platform/v2/x402/verify', {
         x402Version: 2,
         paymentPayload: parsedPayload,
@@ -587,17 +708,25 @@ app.post('/mcp', async (c) => {
         })
       }
 
-      // Settle
       const settleResult = await callFacilitator(c.env, '/platform/v2/x402/settle', {
         x402Version: 2,
         paymentPayload: parsedPayload,
         paymentRequirements: requirements
       })
 
-      // Execute the actual tool logic (LIVE tools only)
-      const toolData = await getLiveCryptoPrices()
+      let toolData: any
+      if (cleanName === 'get_market_data') {
+        toolData = await getLiveCryptoPrices()
+      } else if (cleanName === 'check_token_safety') {
+        toolData = await analyzeTokenSafety(args.address)
+      } else {
+        return c.json({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32000, message: `Tool not executable: ${cleanName}` }
+        })
+      }
 
-      // Return data + full settlement receipt
       return c.json({
         jsonrpc: '2.0',
         id,
@@ -635,7 +764,6 @@ app.post('/mcp', async (c) => {
     }
   }
 
-  // ---------- Method not found ----------
   return c.json({
     jsonrpc: '2.0',
     id: id ?? null,
@@ -651,7 +779,7 @@ app.get('/', (c) => {
   return c.json({
     status: 'ok',
     message: 'x402 Finance Paid API is live!',
-    version: '2.1.0',
+    version: '2.2.0',
     protocol: 'x402-v2 + MCP'
   })
 })
@@ -660,7 +788,7 @@ app.get('/.well-known/x402.json', (c) => {
   return c.json({
     x402Version: 2,
     name: 'x402 Finance API',
-    description: 'Live crypto market data on Base Mainnet (BTC, ETH, SOL, VIRTUAL, AERO, cbBTC). Token Safety & Holder Clusters coming soon.',
+    description: 'Live crypto market data + token safety analysis on Base Mainnet via x402 V2.',
     endpoints: [
       {
         path: '/api/paid-content',
@@ -672,9 +800,10 @@ app.get('/.well-known/x402.json', (c) => {
       {
         path: '/api/token-safety',
         method: 'GET',
-        description: 'Token safety, honeypot & liquidity analysis (coming soon)',
+        description: 'Token safety, honeypot, tax & liquidity analysis on Base',
         price: { amount: PRICE_SAFETY, asset: 'USDC', network: 'Base' },
-        status: 'coming_soon'
+        status: 'live',
+        query: { address: '0x... token contract on Base' }
       },
       {
         path: '/api/holder-clusters',
@@ -690,61 +819,47 @@ app.get('/.well-known/x402.json', (c) => {
 app.get('/llms.txt', (c) => {
   const content = `# x402 Finance API
 
-> Real-time crypto market data on Base Mainnet, protected by x402 V2 micropayments.
+> Real-time crypto market data + token safety on Base Mainnet, protected by x402 V2 micropayments.
 
 ## Status
-- **Market Data**: LIVE and accepting payments
-- **Token Safety**: Coming soon (not accepting payments yet)
+- **Market Data**: LIVE ($0.002 USDC)
+- **Token Safety**: LIVE ($0.04 USDC) — GoPlus + DexScreener
 - **Holder Clusters**: Coming soon (not accepting payments yet)
 
 ## Base URL
 https://x402-paid-api.x402-finance.workers.dev
 
-## Live Endpoint
+## Live Endpoints
 
 ### GET /api/paid-content
-Returns live USD prices for:
-- Bitcoin (BTC)
-- Ethereum (ETH)
-- Solana (SOL)
-- Virtuals Protocol (VIRTUAL)
-- Aerodrome (AERO)
-- Coinbase Wrapped BTC (cbBTC)
+Live USD prices for BTC, ETH, SOL, VIRTUAL, AERO, cbBTC.
+**Price:** 0.002 USDC (2000 atomic units)
 
-**Price:** 0.002 USDC (2000 atomic units)  
-**Network:** Base Mainnet (eip155:8453)  
-**Asset:** USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)  
+### GET /api/token-safety?address=0x...
+Honeypot / tax / liquidity / ownership analysis for a Base token.
+**Price:** 0.04 USDC (40000 atomic units)
+**Required query:** address (0x + 40 hex chars)
+
+**Network:** Base Mainnet (eip155:8453)
+**Asset:** USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
 **Pay To:** 0xE8bC82d53E45e61e07D84536970d695265A51CE4
 
 ### Payment Flow
-1. Call the endpoint → receive HTTP 402 + PAYMENT-REQUIRED header
-2. Sign and submit payment (PAYMENT-SIGNATURE header)
-3. Receive live market data + PAYMENT-RESPONSE header
+1. Call endpoint → HTTP 402 + PAYMENT-REQUIRED
+2. Sign and retry with PAYMENT-SIGNATURE
+3. Receive data + PAYMENT-RESPONSE
 
 ## Discovery
 - Manifest: /.well-known/x402.json
 - MCP tools: /mcp-tools.json
 - MCP JSON-RPC: POST /mcp
+- Smithery: https://smithery.ai/servers/krbaric/x402-finance
 - This file: /llms.txt
 
 ## Protocol
 - x402 Version: 2
 - Facilitator: Coinbase CDP
 - Headers: PAYMENT-REQUIRED, PAYMENT-SIGNATURE, PAYMENT-RESPONSE
-
-## Example Response (after payment)
-{
-  "success": true,
-  "data": {
-    "bitcoin": { "usd": 62700, "change_24h": -0.4 },
-    "ethereum": { "usd": 1860, "change_24h": -0.6 },
-    "solana": { "usd": 72, "change_24h": -2.1 },
-    "virtual": { "usd": 0.55, "change_24h": -1.5 },
-    "aero": { "usd": 0.41, "change_24h": -3.0 },
-    "cbbtc": { "usd": 62700, "change_24h": -0.3 },
-    "source": "CoinGecko"
-  }
-}
 `
   return c.text(content, 200, {
     'Content-Type': 'text/plain; charset=utf-8'
@@ -754,8 +869,8 @@ Returns live USD prices for:
 app.get('/mcp-tools.json', (c) => {
   return c.json({
     name: 'x402-finance',
-    version: '2.1.0',
-    description: 'x402-powered financial tools on Base Mainnet. Primary LIVE tool: get_market_data.',
+    version: '2.2.0',
+    description: 'x402-powered financial tools on Base Mainnet. LIVE: get_market_data + check_token_safety.',
     protocol: 'x402-v2',
     network: NETWORK,
     asset: USDC_BASE,
@@ -778,7 +893,6 @@ app.get('/mcp-tools.json', (c) => {
   })
 })
 
-// Protected REST endpoints
 app.get(
   '/api/paid-content',
   requireX402Payment(PRICE_MARKET, 'Access to live crypto market data', true),
@@ -792,33 +906,47 @@ app.get(
   }
 )
 
-// Temporarily disabled – not ready for payments
-app.get('/api/token-safety', (c) => {
-  return c.json(
-    {
-      error: 'coming_soon',
-      message: 'Token Safety is under development and not accepting payments yet. Use /api/paid-content for live market data.',
-      status: 503
-    },
-    503
-  )
-})
+app.get(
+  '/api/token-safety',
+  async (c, next) => {
+    const address = c.req.query('address')
+    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      throw new HTTPException(400, {
+        message: 'Valid contract address required (?address=0x...)'
+      })
+    }
+    await next()
+  },
+  requireX402Payment(PRICE_SAFETY, 'Token safety analysis', true),
+  async (c) => {
+    try {
+      const address = c.req.query('address')!
+      const report = await analyzeTokenSafety(address)
+      return c.json({
+        success: true,
+        message: 'Token safety analysis (payment verified)',
+        data: report
+      })
+    } catch (err: any) {
+      console.error('Token safety failed:', err)
+      throw new HTTPException(502, {
+        message: 'Failed to analyze token safety'
+      })
+    }
+  }
+)
 
-// Temporarily disabled – not ready for payments
 app.get('/api/holder-clusters', (c) => {
   return c.json(
     {
       error: 'coming_soon',
-      message: 'Holder Clusters is under development and not accepting payments yet. Use /api/paid-content for live market data.',
+      message: 'Holder Clusters is under development and not accepting payments yet.',
       status: 503
     },
     503
   )
 })
 
-// ======================================================
-// Error Handlers
-// ======================================================
 app.onError((err, c) => {
   if (err instanceof HTTPException) {
     return c.json({ error: err.message, status: err.status }, err.status)

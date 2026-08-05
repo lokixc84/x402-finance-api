@@ -1,16 +1,36 @@
 # x402 Finance API
 
-> A pay-per-request cryptocurrency price API protected by the x402 micropayment protocol. Designed for autonomous AI agents and agentic systems. Agents can call the API, receive a 402 challenge, send 0.01 USDC on Base Sepolia, and retrieve real-time market data using the transaction hash as payment proof.
+> Real-time crypto market data on Base Mainnet, protected by x402 V2 micropayments.
 
-## Documentation
+## Status
+- **Market Data**: LIVE and accepting payments
+- **Token Safety**: Coming soon (not accepting payments yet)
+- **Holder Clusters**: Coming soon (not accepting payments yet)
 
-- [AGENT_GUIDE.md](AGENT_GUIDE.md) — Complete integration guide for autonomous agents, including payment flow, code examples, and error handling patterns.
-- [README.md](README.md) — Project overview and basic usage information.
+## Base URL
+https://x402-paid-api.x402-finance.workers.dev
 
-## Key Information
+## Live Endpoint
 
-- **Live Endpoint:** https://x402-finance-api.onrender.com
-- **Payment Model:** 0.01 USDC per request (exact)
-- **Network:** Base Sepolia (testnet)
-- **Payment Header:** `x-payment-tx`
-- **Supported Queries:** Single asset via path parameter (e.g. `/crypto/bitcoin`, `/crypto/ethereum`)
+### GET /api/paid-content
+Returns live USD prices (BTC, ETH, SOL and related).
+**Price:** $0.002 USDC (2000 atomic units)
+**Network:** Base Mainnet (eip155:8453)
+**Asset:** USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
+**Pay To:** 0xE8bC82d53E45e61e07D84536970d695265A51CE4
+
+**Payment flow:**
+1. Call without payment → HTTP 402 + PAYMENT-REQUIRED
+2. Sign and submit PAYMENT-SIGNATURE
+3. Receive data + PAYMENT-RESPONSE
+
+## Discovery
+- MCP tools: https://x402-paid-api.x402-finance.workers.dev/mcp-tools.json
+- MCP JSON-RPC: POST https://x402-paid-api.x402-finance.workers.dev/mcp
+- Manifest: https://x402-paid-api.x402-finance.workers.dev/.well-known/x402.json
+- Smithery: https://smithery.ai/servers/krbaric/x402-finance
+
+## Protocol
+- x402 Version: 2
+- Headers: PAYMENT-REQUIRED, PAYMENT-SIGNATURE, PAYMENT-RESPONSE
+- Facilitator: Coinbase CDP

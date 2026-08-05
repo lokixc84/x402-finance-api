@@ -1,30 +1,31 @@
 {
-    "name": "x402 Finance API",
-    "description": "Live, aggressively cached real-time cryptocurrency price data protected by the x402 micropayment protocol. Returns current USD prices for any CoinGecko-supported asset.",
-    "version": "1.0.0",
-    "protocol": "x402",
-    "network": "base-sepolia",
-    "payment": {
-        "asset": "USDC",
-        "amount": "0.01",
-        "exact": true
-    },
-    "endpoint": "https://x402-finance-api.onrender.com/crypto/{symbol}",
-    "method": "GET",
-    "headers": {
-        "x-payment-tx": "Transaction hash of exact 0.01 USDC transfer"
-    },
-    "features": [
-        "30-second in-memory cache with stale-while-revalidate",
-        "Strict on-chain payment verification",
-        "High reliability vs ghost endpoints",
-        "Single-asset path parameter design"
-    ],
-    "documentation": {
-        "agent_guide": "https://github.com/lokixc84/x402-finance-api/blob/main/AGENT_GUIDE.md",
-        "llms_txt": "https://github.com/lokixc84/x402-finance-api/blob/main/llms.txt",
-        "repository": "https://github.com/lokixc84/x402-finance-api"
-    },
-    "status": "live",
-    "last_verified": "2026-07-20"
+  "name": "x402 Finance API",
+  "description": "Live crypto market data on Base Mainnet, protected by x402 V2 micropayments. No API key — agents pay per call in USDC.",
+  "version": "2.1.0",
+  "protocol": "x402-v2",
+  "network": "eip155:8453",
+  "payment": {
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "assetSymbol": "USDC",
+    "amount": "0.002",
+    "amountAtomic": "2000",
+    "payTo": "0xE8bC82d53E45e61e07D84536970d695265A51CE4",
+    "exact": true
+  },
+  "endpoint": "https://x402-paid-api.x402-finance.workers.dev/api/paid-content",
+  "method": "GET",
+  "headers": {
+    "PAYMENT-REQUIRED": "Server challenge (HTTP 402)",
+    "PAYMENT-SIGNATURE": "Client signed payment payload",
+    "PAYMENT-RESPONSE": "Settlement receipt"
+  },
+  "discovery": {
+    "llms_txt": "https://x402-paid-api.x402-finance.workers.dev/llms.txt",
+    "mcp_tools": "https://x402-paid-api.x402-finance.workers.dev/mcp-tools.json",
+    "mcp": "https://x402-paid-api.x402-finance.workers.dev/mcp",
+    "x402_json": "https://x402-paid-api.x402-finance.workers.dev/.well-known/x402.json",
+    "smithery": "https://smithery.ai/servers/krbaric/x402-finance"
+  },
+  "status": "live",
+  "last_verified": "2026-08-05"
 }

@@ -15,6 +15,7 @@ Real-time crypto market data on Base Mainnet, protected by x402 V2 micropayments
 **GET** `https://x402-paid-api.x402-finance.workers.dev/api/paid-content`
 
 Returns USD prices for:
+
 - Bitcoin (BTC)
 - Ethereum (ETH)
 - Solana (SOL)
@@ -38,8 +39,57 @@ Returns USD prices for:
 - MCP tools: `/mcp-tools.json`
 - MCP JSON-RPC: `POST /mcp`
 - LLM docs: `/llms.txt`
+- Smithery: https://smithery.ai/servers/krbaric/x402-finance
+- CDP Bazaar: indexed (payTo `0xE8bC82d53E45e61e07D84536970d695265A51CE4`)
 
 ## Quick Test (Node.js)
 
-```bash
+~~~bash
 npm install @x402/fetch @x402/evm viem dotenv tsx
+~~~
+
+See `x402-client-test/test-payment.ts` for a full paid request example.
+
+## ElizaOS plugin
+
+Lightweight action plugin for ElizaOS agents.
+
+### Local path
+
+~~~bash
+# from your ElizaOS project
+npm install ../elizaos-plugin
+# or absolute path to the elizaos-plugin folder
+~~~
+
+### Env (agent runtime)
+
+~~~env
+X402_PAYER_PRIVATE_KEY=0xYOUR_AGENT_WALLET_PRIVATE_KEY
+~~~
+
+Use a **payer** wallet with USDC on Base — not the merchant `payTo` address.
+
+### Register in character / agent config
+
+~~~typescript
+import x402FinancePlugin from 'x402-elizaos-plugin'
+// or: import x402FinancePlugin from '../path/to/elizaos-plugin/dist/index.js'
+
+plugins: [x402FinancePlugin]
+~~~
+
+### Action
+
+| Action | What it does | Price |
+|--------|----------------|-------|
+| `GET_MARKET_DATA` | Live BTC/ETH/SOL (+ more) via x402 | $0.002 USDC |
+
+Package source: `elizaos-plugin/` in this monorepo.
+
+## Links
+
+- Live API: https://x402-paid-api.x402-finance.workers.dev  
+- Docs (`llms.txt`): https://x402-paid-api.x402-finance.workers.dev/llms.txt  
+- MCP tools: https://x402-paid-api.x402-finance.workers.dev/mcp-tools.json  
+- X: https://x.com/x402_finance  

@@ -1,28 +1,35 @@
 # x402 Finance API
 
-**Real-time crypto market data protected by x402 micropayments.**
+Live crypto market data on **Base Mainnet**, monetized with **x402 V2** micropayments (USDC).
 
-This API provides on-demand cryptocurrency price data managed by the **x402 payment protocol**. AI agents and autonomous scripts can pay per request seamlessly using USDC on Base Sepolia.
+No API keys. Agents pay per call.
 
-**Live Endpoint:** [https://x402-finance-api.onrender.com](https://x402-finance-api.onrender.com)
+## Live endpoint
 
----
+**Base URL:** https://x402-paid-api.x402-finance.workers.dev
 
-## API Endpoints
+| Route | Price | Status |
+|-------|-------|--------|
+| `GET /api/paid-content` | $0.002 USDC | LIVE |
+| `GET /api/token-safety` | $0.04 USDC | Coming soon |
+| `GET /api/holder-clusters` | $0.01 USDC | Coming soon |
 
-### `GET /crypto/{symbol}`
-Returns the current market price of a cryptocurrency.
+## Discovery
 
-* **Parameters:** 
-  * `symbol` (path string) — The asset ID (e.g., `bitcoin`, `ethereum`, `solana`).
+- Docs (agents): https://x402-paid-api.x402-finance.workers.dev/llms.txt
+- MCP tools: https://x402-paid-api.x402-finance.workers.dev/mcp-tools.json
+- MCP JSON-RPC: `POST https://x402-paid-api.x402-finance.workers.dev/mcp`
+- Manifest: https://x402-paid-api.x402-finance.workers.dev/.well-known/x402.json
+- Smithery: https://smithery.ai/servers/krbaric/x402-finance
 
-#### Example Verified Response:
-```json
-{
-  "symbol": "BITCOIN",
-  "price_usd": 64585,
-  "timestamp": "2026-07-19T10:36:59.203081",
-  "source": "CoinGecko",
-  "cached": false,
-  "cache_age_seconds": 0
-}
+## Network
+
+- Chain: Base Mainnet (`eip155:8453`)
+- Asset: USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
+- Pay to: `0xE8bC82d53E45e61e07D84536970d695265A51CE4`
+- Protocol: x402 V2 (PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE)
+
+## Quick test
+
+```bash
+curl -i https://x402-paid-api.x402-finance.workers.dev/api/paid-content

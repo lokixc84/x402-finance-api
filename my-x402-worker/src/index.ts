@@ -393,6 +393,8 @@ const MCP_TOOLS = [
   }
 ]
 
+const LIVE_MCP_TOOLS = new Set(['get_market_data'])
+
 // ======================================================
 // MCP JSON-RPC Handler (POST /mcp)
 // ======================================================
@@ -497,7 +499,19 @@ app.post('/mcp', async (c) => {
       return c.json({
         jsonrpc: '2.0',
         id,
-        error: { code: -32601, message: `Unknown tool: ${toolName} ` }
+        error: { code: -32601, message: `Unknown tool: ${toolName}` }
+      })
+    }
+
+    // Block payments for tools that are not production-ready
+    if (!LIVE_MCP_TOOLS.has(cleanName)) {
+      return c.json({
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: -32000,
+          message: `${cleanName} is coming soon and is not accepting payments yet. Use get_market_data for live market data.`
+        }
       })
     }
 
@@ -517,8 +531,8 @@ app.post('/mcp', async (c) => {
 
     // CASE 1: No payment yet → return structured challenge
     if (!paymentSignature) {
-      const resource = `mcp:${cleanName} `
-      const challenge = createChallenge(resource, config.amount, config.description)
+      const resource = `mcp:${cleanName}`
+      const challenge = createChallenge(resource, config.amount, config.description, cleanName === 'get_market_data')
 
       return c.json({
         jsonrpc: '2.0',
@@ -532,7 +546,7 @@ app.post('/mcp', async (c) => {
                 message: 'Payment required via x402. Sign the challenge and call the tool again with paymentSignature.',
                 challenge: challenge,
                 amount: config.amount,
-                amountUsd: cleanName === 'get_market_data' ? '0.002' : cleanName === 'check_token_safety' ? '0.04' : '0.01',
+                amountUsd: '0.002',
                 network: NETWORK,
                 asset: USDC_BASE,
                 payTo: PAY_TO
@@ -553,7 +567,7 @@ app.post('/mcp', async (c) => {
         parsedPayload = JSON.parse(paymentSignature)
       }
 
-      const requirements = createChallenge(`mcp:${cleanName} `, config.amount, config.description).accepts[0]
+      const requirements = createChallenge(`mcp:${cleanName}`, config.amount, config.description, true).accepts[0]
 
       // Verify
       const verifyResult = await callFacilitator(c.env, '/platform/v2/x402/verify', {
@@ -568,7 +582,7 @@ app.post('/mcp', async (c) => {
           id,
           error: {
             code: -32000,
-            message: `Payment verification failed: ${verifyResult.invalidReason || verifyResult.error || 'Unknown'} `
+            message: `Payment verification failed: ${verifyResult.invalidReason || verifyResult.error || 'Unknown'}`
           }
         })
       }
@@ -580,73 +594,8 @@ app.post('/mcp', async (c) => {
         paymentRequirements: requirements
       })
 
-      // Execute the actual tool logic
-      let toolData: any
-
-      if (cleanName === 'get_market_data') {
-        toolData = await getLiveCryptoPrices()
-      } else if (cleanName === 'check_token_safety') {
-        const address = args.address.toLowerCase()
-        toolData = {
-          address,
-          risk_score: 27,
-          risk_level: 'Low',
-          checks: {
-            is_honeypot: false,
-            can_sell: true,
-            high_tax: false,
-            liquidity_locked: true,
-            ownership_renounced: true,
-            proxy_contract: false,
-            mintable: false
-          },
-          liquidity: { usd_value: 184250.55, pair: 'WETH', locked_percentage: 98.4 },
-          contract: { verified: true, compiler: 'v0.8.19+commit.7dd6d404', optimization: true },
-          summary: 'Token appears low-risk. Liquidity is locked and ownership is renounced.',
-          analyzed_at: new Date().toISOString(),
-          source: 'x402-Finance-API'
-        }
-      } else if (cleanName === 'analyze_holder_clusters') {
-        const address = args.address.toLowerCase()
-        toolData = {
-          address,
-          concentration: {
-            top10_percentage: 41.8,
-            top20_percentage: 58.3,
-            top50_percentage: 72.1,
-            gini_coefficient: 0.74
-          },
-          clusters: [
-            {
-              id: 'cluster_01',
-              size: 7,
-              total_percentage: 18.6,
-              shared_funding: true,
-              funding_source: 'CEX deposit (Binance)',
-              risk: 'medium'
-            },
-            {
-              id: 'cluster_02',
-              size: 4,
-              total_percentage: 9.2,
-              shared_funding: true,
-              funding_source: 'Same deployer wallet',
-              risk: 'high'
-            }
-          ],
-          flags: {
-            high_concentration: true,
-            possible_cabal: true,
-            cex_heavy: true,
-            deployer_still_holding: true
-          },
-          risk_score: 62,
-          risk_level: 'Medium-High',
-          summary: 'Moderate concentration risk. Two related clusters control ~28% of supply.',
-          analyzed_at: new Date().toISOString(),
-          source: 'x402-Finance-API'
-        }
-      }
+      // Execute the actual tool logic (LIVE tools only)
+      const toolData = await getLiveCryptoPrices()
 
       // Return data + full settlement receipt
       return c.json({
@@ -690,12 +639,12 @@ app.post('/mcp', async (c) => {
   return c.json({
     jsonrpc: '2.0',
     id: id ?? null,
-    error: { code: -32601, message: `Method not found: ${method} ` }
+    error: { code: -32601, message: `Method not found: ${method}` }
   })
 })
 
 // ======================================================
-// Existing REST Routes (unchanged)
+// Existing REST Routes
 // ======================================================
 
 app.get('/', (c) => {
@@ -806,7 +755,7 @@ app.get('/mcp-tools.json', (c) => {
   return c.json({
     name: 'x402-finance',
     version: '2.1.0',
-    description: 'x402-powered financial tools on Base Mainnet',
+    description: 'x402-powered financial tools on Base Mainnet. Primary LIVE tool: get_market_data.',
     protocol: 'x402-v2',
     network: NETWORK,
     asset: USDC_BASE,
@@ -814,6 +763,7 @@ app.get('/mcp-tools.json', (c) => {
     baseUrl: 'https://x402-paid-api.x402-finance.workers.dev',
     tools: MCP_TOOLS.map((t) => ({
       ...t,
+      status: LIVE_MCP_TOOLS.has(t.name) ? 'live' : 'coming_soon',
       payment: {
         amount:
           t.name === 'get_market_data'

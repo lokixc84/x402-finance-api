@@ -16,6 +16,7 @@ const FACILITATOR_HOST = 'api.cdp.coinbase.com'
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 const PAY_TO = '0xE8bC82d53E45e61e07D84536970d695265A51CE4'
 const NETWORK = 'eip155:8453'
+const WORKER_ORIGIN = 'https://x402-paid-api.x402-finance.workers.dev'
 
 const PRICE_MARKET = '2000'    // $0.002 USDC
 const PRICE_SAFETY = '40000'   // $0.04 USDC
@@ -26,6 +27,11 @@ const CACHE_TTL_SECONDS = 300
 
 let priceCache: { data: any; timestamp: number } | null = null
 const MEMORY_TTL_MS = 120_000   // 2 minutes
+
+// Token-safety in-memory cache (per isolate)
+const safetyMemory = new Map<string, { data: any; timestamp: number }>()
+const SAFETY_MEMORY_TTL_MS = 60_000 // 60 seconds
+const SAFETY_CACHE_TTL_SECONDS = 60
 
 // ======================================================
 // CORS
@@ -93,9 +99,9 @@ function createChallenge(resource: string, amount: string, description: string, 
             example: {
               success: true,
               data: {
-                bitcoin: { usd: 63000, change_24h: -0.5 },
-                ethereum: { usd: 1800, change_24h: 0.2 },
-                solana: { usd: 70, change_24h: -1.1 }
+                risk_score: 18,
+                risk_level: 'Low',
+                recommendation: 'proceed_with_caution'
               }
             }
           }
@@ -110,23 +116,51 @@ function createChallenge(resource: string, amount: string, description: string, 
 async function callFacilitator(
   env: Bindings,
   path: '/platform/v2/x402/verify' | '/platform/v2/x402/settle',
-  body: any
+  body: any,
+  retries = path.endsWith('/settle') ? 3 : 1
 ) {
-  const authHeader = await getAuthHeader(env, path)
-  const res = await fetch(`https://${FACILITATOR_HOST}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: authHeader
-    },
-    body: JSON.stringify(body)
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    console.error(`Facilitator ${path} failed:`, res.status, JSON.stringify(data))
-    throw new Error(`Facilitator ${path} error: ${res.status}`)
+  let lastError: Error | null = null
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const authHeader = await getAuthHeader(env, path)
+      const res = await fetch(`https://${FACILITATOR_HOST}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: authHeader
+        },
+        body: JSON.stringify(body)
+      })
+
+      const raw = await res.text()
+      let data: any
+      try {
+        data = raw ? JSON.parse(raw) : {}
+      } catch {
+        console.error(`Facilitator ${path} non-JSON (attempt ${attempt}):`, res.status, raw.slice(0, 200))
+        throw new Error(`Facilitator ${path} returned non-JSON status ${res.status}`)
+      }
+
+      if (!res.ok) {
+        console.error(`Facilitator ${path} failed (attempt ${attempt}):`, res.status, JSON.stringify(data))
+        throw new Error(
+          `Facilitator ${path} error: ${res.status} ${data?.errorMessage || data?.error || ''}`.trim()
+        )
+      }
+
+      return data
+    } catch (err: any) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      if (attempt < retries) {
+        console.warn(`Facilitator ${path} retry ${attempt}/${retries}:`, lastError.message)
+        await new Promise((r) => setTimeout(r, 400 * attempt))
+        continue
+      }
+    }
   }
-  return data
+
+  throw lastError || new Error(`Facilitator ${path} failed`)
 }
 
 // ======================================================
@@ -136,8 +170,12 @@ function requireX402Payment(amount: string, description: string, includeBazaar =
   return async (c: any, next: () => Promise<void>) => {
     const paymentSignatureHeader = c.req.header('PAYMENT-SIGNATURE')
 
+    // Stable resource: origin + pathname only (ignore query / scheme noise)
+    const url = new URL(c.req.url)
+    const stableResource = `${WORKER_ORIGIN}${url.pathname}`
+
     if (!paymentSignatureHeader) {
-      const challenge = createChallenge(c.req.url, amount, description, includeBazaar)
+      const challenge = createChallenge(stableResource, amount, description, includeBazaar)
       c.header('PAYMENT-REQUIRED', btoa(JSON.stringify(challenge)))
       return c.json(challenge, 402)
     }
@@ -154,7 +192,7 @@ function requireX402Payment(amount: string, description: string, includeBazaar =
     }
 
     try {
-      const requirements = createChallenge(c.req.url, amount, description, includeBazaar).accepts[0]
+      const requirements = createChallenge(stableResource, amount, description, includeBazaar).accepts[0]
 
       const verifyResult = await callFacilitator(c.env, '/platform/v2/x402/verify', {
         x402Version: 2,
@@ -169,13 +207,20 @@ function requireX402Payment(amount: string, description: string, includeBazaar =
         throw new HTTPException(402, { message: `Payment verification failed: ${reason}` })
       }
 
-      const settleResult = await callFacilitator(c.env, '/platform/v2/x402/settle', {
-        x402Version: 2,
-        paymentPayload: parsedPayload,
-        paymentRequirements: requirements
-      })
-
-      console.log('Settle result:', JSON.stringify(settleResult, null, 2))
+      let settleResult: any
+      try {
+        settleResult = await callFacilitator(c.env, '/platform/v2/x402/settle', {
+          x402Version: 2,
+          paymentPayload: parsedPayload,
+          paymentRequirements: requirements
+        })
+        console.log('Settle result:', JSON.stringify(settleResult, null, 2))
+      } catch (settleErr: any) {
+        console.error('Settle failed:', settleErr?.message || settleErr)
+        throw new HTTPException(402, {
+          message: `Payment settlement failed: ${settleErr?.message || 'unknown'}`
+        })
+      }
 
       if (settleResult.paymentResponse || settleResult.transaction) {
         c.header(
@@ -185,114 +230,259 @@ function requireX402Payment(amount: string, description: string, includeBazaar =
             : btoa(JSON.stringify(settleResult))
         )
       }
-      console.log('[PAYMENT SUCCESS] amount=' + amount + ' payer=' + (verifyResult.payer || 'unknown') + ' tx=' + (settleResult.transaction || 'n/a'))
+      console.log(
+        '[PAYMENT SUCCESS] amount=' +
+          amount +
+          ' payer=' +
+          (verifyResult.payer || 'unknown') +
+          ' tx=' +
+          (settleResult.transaction || 'n/a')
+      )
 
       await next()
     } catch (err: any) {
       if (err instanceof HTTPException) throw err
-      throw new HTTPException(402, { message: 'Payment verification failed' })
+      console.error('Payment middleware error:', err?.message || err)
+      throw new HTTPException(402, {
+        message: `Payment processing failed: ${err?.message || 'unknown'}`
+      })
     }
   }
 }
 
 // ======================================================
-// Token Safety (GoPlus + DexScreener)
+// Token Safety helpers
+// ======================================================
+function flag01(v: any): boolean | null {
+  if (v === undefined || v === null || v === '') return null
+  return v === '1' || v === 1 || v === true || v === 'true'
+}
+
+function parseTax(v: any): number | null {
+  if (v === undefined || v === null || v === '') return null
+  const n = parseFloat(String(v))
+  return Number.isFinite(n) ? n : null
+}
+
+async function fetchGoPlus(normalized: string, headers: Record<string, string>, attempts = 3) {
+  let lastErr: any = null
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const res = await fetch(
+        `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=${normalized}`,
+        { headers, signal: AbortSignal.timeout(9000) }
+      )
+      if (res.ok) {
+        const json = await res.json()
+        const data = json?.result?.[normalized] || null
+        if (data) return data
+        // Empty result — token unknown to GoPlus; don't retry forever
+        console.warn('GoPlus empty result for', normalized)
+        return null
+      }
+      console.warn('GoPlus status:', res.status, 'attempt', i)
+      lastErr = new Error(`GoPlus ${res.status}`)
+    } catch (e) {
+      lastErr = e
+      console.warn('GoPlus attempt', i, 'failed', e)
+    }
+    if (i < attempts) await new Promise((r) => setTimeout(r, 350 * i))
+  }
+  if (lastErr) console.warn('GoPlus gave up', lastErr)
+  return null
+}
+
+async function fetchHoneypotIs(normalized: string, headers: Record<string, string>) {
+  try {
+    // Base = chainID 8453; API key not required at time of writing
+    const res = await fetch(
+      `https://api.honeypot.is/v2/IsHoneypot?address=${normalized}&chainID=8453`,
+      { headers, signal: AbortSignal.timeout(9000) }
+    )
+    if (!res.ok) {
+      console.warn('Honeypot.is status:', res.status)
+      return null
+    }
+    return await res.json()
+  } catch (e) {
+    console.warn('Honeypot.is failed', e)
+    return null
+  }
+}
+
+async function fetchDexScreener(normalized: string, headers: Record<string, string>) {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/tokens/v1/base/${normalized}`, {
+      headers,
+      signal: AbortSignal.timeout(8000)
+    })
+    if (!res.ok) {
+      console.warn('DexScreener status:', res.status)
+      return null
+    }
+    const pairs = await res.json()
+    if (Array.isArray(pairs) && pairs.length > 0) {
+      return pairs.sort(
+        (a: any, b: any) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
+      )[0]
+    }
+    return null
+  } catch (e) {
+    console.warn('DexScreener failed', e)
+    return null
+  }
+}
+
+function safetyCacheKey(address: string) {
+  return new Request(`https://x402-finance.internal/token-safety/${address.toLowerCase()}`)
+}
+
+// ======================================================
+// Token Safety (GoPlus + Honeypot.is + DexScreener)
 // ======================================================
 async function analyzeTokenSafety(address: string) {
   const normalized = address.toLowerCase()
+  const now = Date.now()
   const headers = {
-    'User-Agent': 'x402-Finance-Worker/1.0',
+    'User-Agent': 'x402-Finance-Worker/2.3',
     Accept: 'application/json'
   }
 
-  let goplus: any = null
-  let dex: any = null
-
-  try {
-    const res = await fetch(
-      `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=${normalized}`,
-      { headers, signal: AbortSignal.timeout(10000) }
-    )
-    if (res.ok) {
-      const json = await res.json()
-      goplus = json?.result?.[normalized] || null
-    } else {
-      console.warn('GoPlus status:', res.status)
-    }
-  } catch (e) {
-    console.warn('GoPlus failed', e)
+  // 1) Memory cache
+  const mem = safetyMemory.get(normalized)
+  if (mem && now - mem.timestamp < SAFETY_MEMORY_TTL_MS) {
+    return { ...mem.data, cached: true, stale: false }
   }
 
+  // 2) Cloudflare Cache API
   try {
-    const res = await fetch(
-      `https://api.dexscreener.com/tokens/v1/base/${normalized}`,
-      { headers, signal: AbortSignal.timeout(8000) }
-    )
-    if (res.ok) {
-      const pairs = await res.json()
-      if (Array.isArray(pairs) && pairs.length > 0) {
-        dex = pairs.sort(
-          (a: any, b: any) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
-        )[0]
-      }
+    const hit = await caches.default.match(safetyCacheKey(normalized))
+    if (hit) {
+      const data = await hit.json()
+      safetyMemory.set(normalized, { data, timestamp: now })
+      return { ...data, cached: true, stale: false }
     }
   } catch (e) {
-    console.warn('DexScreener failed', e)
+    console.warn('Safety CF cache read failed', e)
   }
 
-  if (!goplus && !dex) {
+  // 3) Parallel upstream fetches
+  const [goplus, honeypot, dex] = await Promise.all([
+    fetchGoPlus(normalized, headers, 3),
+    fetchHoneypotIs(normalized, headers),
+    fetchDexScreener(normalized, headers)
+  ])
+
+  if (!goplus && !honeypot && !dex) {
     throw new Error('Token safety providers unavailable')
   }
 
-  const isHoneypot = goplus?.is_honeypot === '1' || goplus?.is_honeypot === 1
-  const canSell = goplus?.cannot_sell_all !== '1' && goplus?.cannot_sell_all !== 1
-  const buyTax = parseFloat(goplus?.buy_tax ?? '0') || 0
-  const sellTax = parseFloat(goplus?.sell_tax ?? '0') || 0
-  const highTax = buyTax > 10 || sellTax > 10
-  const isProxy = goplus?.is_proxy === '1' || goplus?.is_proxy === 1
-  const isOpenSource = goplus?.is_open_source === '1' || goplus?.is_open_source === 1
-  const isMintable = goplus?.is_mintable === '1' || goplus?.is_mintable === 1
-  const ownerRenounced =
-    !goplus?.owner_address ||
-    goplus.owner_address === '0x0000000000000000000000000000000000000000' ||
-    goplus?.can_take_back_ownership === '0'
+  // --- Merge security signals (prefer GoPlus, fill from Honeypot.is) ---
+  let isHoneypot: boolean | null = flag01(goplus?.is_honeypot)
+  let canSell: boolean | null =
+    goplus != null ? goplus.cannot_sell_all !== '1' && goplus.cannot_sell_all !== 1 : null
+  let buyTax: number | null = parseTax(goplus?.buy_tax)
+  let sellTax: number | null = parseTax(goplus?.sell_tax)
+  let isProxy: boolean | null = flag01(goplus?.is_proxy)
+  let isOpenSource: boolean | null = flag01(goplus?.is_open_source)
+  let isMintable: boolean | null = flag01(goplus?.is_mintable)
+  let ownerRenounced: boolean | null = null
+  if (goplus) {
+    ownerRenounced =
+      !goplus.owner_address ||
+      goplus.owner_address === '0x0000000000000000000000000000000000000000' ||
+      goplus.can_take_back_ownership === '0'
+  }
+
+  // Honeypot.is fill-ins
+  if (honeypot) {
+    const hp = honeypot.honeypotResult?.isHoneypot
+    if (typeof hp === 'boolean') {
+      if (isHoneypot === null) isHoneypot = hp
+      else if (hp === true) isHoneypot = true // escalate if either source says honeypot
+    }
+    const sim = honeypot.simulationResult
+    if (sim) {
+      if (buyTax === null && sim.buyTax !== undefined) buyTax = Number(sim.buyTax) || 0
+      if (sellTax === null && sim.sellTax !== undefined) sellTax = Number(sim.sellTax) || 0
+      if (canSell === null && typeof sim.sellTax === 'number') {
+        // If simulation produced sell tax, sell path exists
+        canSell = true
+      }
+    }
+    if (honeypot.honeypotResult?.isHoneypot === true) canSell = false
+  }
+
+  const highTax =
+    (buyTax !== null && buyTax > 10) || (sellTax !== null && sellTax > 10) ? true : buyTax === null && sellTax === null ? null : false
 
   const liquidityUsd = dex?.liquidity?.usd ?? null
-  const liquidityLocked = goplus?.lp_holder_count
-    ? Number(goplus.lp_holder_count) > 0
-    : false
+  const liquidityLocked = goplus?.lp_holder_count ? Number(goplus.lp_holder_count) > 0 : null
 
-  let risk = 10
-  if (isHoneypot) risk += 50
-  if (!canSell) risk += 25
-  if (highTax) risk += 15
-  if (isMintable) risk += 10
-  if (isProxy) risk += 5
-  if (!isOpenSource) risk += 8
+  // Risk score — only add points for known-bad signals; unknown does not equal safe
+  let risk = 15 // baseline when data is partial
+  if (goplus || honeypot) risk = 10
+  if (isHoneypot === true) risk += 50
+  if (canSell === false) risk += 25
+  if (highTax === true) risk += 15
+  if (isMintable === true) risk += 10
+  if (isProxy === true) risk += 5
+  if (isOpenSource === false) risk += 8
   if (liquidityUsd !== null && liquidityUsd < 5000) risk += 12
   if (liquidityUsd !== null && liquidityUsd < 1000) risk += 10
+  if (!goplus && !honeypot) risk += 15 // no security source at all
   risk = Math.min(100, risk)
 
   const risk_level =
     risk >= 70 ? 'High' : risk >= 40 ? 'Medium' : risk >= 20 ? 'Low-Medium' : 'Low'
 
-  return {
+  const hasSecurity = !!(goplus || honeypot)
+  const hasMarket = !!dex
+  const data_quality =
+    hasSecurity && hasMarket ? 'full' : hasSecurity ? 'security_only' : hasMarket ? 'liquidity_only' : 'minimal'
+
+  // Agent-facing recommendation (explicit, not marketing)
+  let recommendation: 'avoid' | 'high_caution' | 'proceed_with_caution' | 'insufficient_data'
+  if (isHoneypot === true || canSell === false || risk >= 70) {
+    recommendation = 'avoid'
+  } else if (risk >= 40 || highTax === true) {
+    recommendation = 'high_caution'
+  } else if (!hasSecurity) {
+    recommendation = 'insufficient_data'
+  } else {
+    recommendation = 'proceed_with_caution'
+  }
+
+  const summaryParts: string[] = []
+  if (isHoneypot === true) summaryParts.push('Flagged as possible honeypot.')
+  if (canSell === false) summaryParts.push('Sell path blocked or restricted.')
+  if (highTax === true) summaryParts.push(`High tax: buy ${buyTax ?? '?'}% / sell ${sellTax ?? '?'}%.`)
+  if (!hasSecurity) summaryParts.push('No security oracle data — liquidity only.')
+  if (summaryParts.length === 0) {
+    summaryParts.push(
+      `Risk ${risk_level} (${risk}/100). Liquidity ~$${liquidityUsd != null ? Math.round(liquidityUsd) : 'n/a'}.`
+    )
+  }
+
+  const report = {
     address: normalized,
     chain: 'base',
     chainId: 8453,
     risk_score: risk,
     risk_level,
+    recommendation,
+    data_quality,
     checks: {
-      is_honeypot: !!isHoneypot,
-      can_sell: !!canSell,
+      is_honeypot: isHoneypot,
+      can_sell: canSell,
       high_tax: highTax,
       buy_tax_pct: buyTax,
       sell_tax_pct: sellTax,
-      liquidity_locked: !!liquidityLocked,
-      ownership_renounced: !!ownerRenounced,
-      proxy_contract: !!isProxy,
-      open_source: !!isOpenSource,
-      mintable: !!isMintable
+      liquidity_locked: liquidityLocked,
+      ownership_renounced: ownerRenounced,
+      proxy_contract: isProxy,
+      open_source: isOpenSource,
+      mintable: isMintable
     },
     liquidity: {
       usd_value: liquidityUsd,
@@ -308,17 +498,34 @@ async function analyzeTokenSafety(address: string) {
       creator: goplus?.creator_address || null,
       holder_count: goplus?.holder_count ? Number(goplus.holder_count) : null
     },
-    summary: isHoneypot
-      ? 'High risk: token flagged as possible honeypot.'
-      : highTax
-        ? `Elevated risk: buy/sell tax ${buyTax}% / ${sellTax}%.`
-        : `Risk level ${risk_level}. Liquidity ~$${liquidityUsd != null ? Math.round(liquidityUsd) : 'n/a'}.`,
+    summary: summaryParts.join(' '),
     analyzed_at: new Date().toISOString(),
     source: {
-      security: goplus ? 'GoPlus' : null,
+      security: goplus ? 'GoPlus' : honeypot ? 'Honeypot.is' : null,
+      security_secondary: goplus && honeypot ? 'Honeypot.is' : null,
       market: dex ? 'DexScreener' : null
-    }
+    },
+    cached: false,
+    stale: false
   }
+
+  // Write caches
+  safetyMemory.set(normalized, { data: report, timestamp: now })
+  try {
+    await caches.default.put(
+      safetyCacheKey(normalized),
+      new Response(JSON.stringify(report), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': `max-age=${SAFETY_CACHE_TTL_SECONDS}`
+        }
+      })
+    )
+  } catch (e) {
+    console.warn('Safety CF cache write failed', e)
+  }
+
+  return report
 }
 
 // ======================================================
@@ -335,7 +542,7 @@ async function getLiveCryptoPrices() {
     const res = await fetch(
       'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,virtual-protocol,aerodrome-finance,coinbase-wrapped-btc&vs_currencies=usd&include_24hr_change=true&include_last_updated_at=true',
       {
-        headers: { 'User-Agent': 'x402-Finance-Worker/1.0', Accept: 'application/json' },
+        headers: { 'User-Agent': 'x402-Finance-Worker/2.3', Accept: 'application/json' },
         signal: AbortSignal.timeout(8000)
       }
     )
@@ -409,7 +616,7 @@ async function getLiveCryptoPrices() {
 
   try {
     const res = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD', {
-      headers: { 'User-Agent': 'x402-Finance-Worker/1.0', Accept: 'application/json' },
+      headers: { 'User-Agent': 'x402-Finance-Worker/2.3', Accept: 'application/json' },
       signal: AbortSignal.timeout(8000)
     })
     if (res.ok) {
@@ -467,7 +674,7 @@ async function getLiveCryptoPrices() {
 }
 
 // ======================================================
-// MCP Tool Definitions (used by tools/list)
+// MCP Tool Definitions
 // ======================================================
 const MCP_TOOLS = [
   {
@@ -483,7 +690,7 @@ const MCP_TOOLS = [
   {
     name: 'check_token_safety',
     description:
-      'Analyze a Base token for honeypot risk, taxes, liquidity and ownership. Cost: $0.04 USDC via x402. LIVE.',
+      'Analyze a Base token for honeypot risk, taxes, liquidity and ownership. Returns risk_score, recommendation, and data_quality. Cost: $0.04 USDC via x402. LIVE.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -553,13 +760,8 @@ app.post('/mcp', async (c) => {
       id,
       result: {
         protocolVersion: '2024-11-05',
-        capabilities: {
-          tools: {}
-        },
-        serverInfo: {
-          name: 'x402-finance',
-          version: '2.2.0'
-        }
+        capabilities: { tools: {} },
+        serverInfo: { name: 'x402-finance', version: '2.3.0' }
       }
     })
   }
@@ -572,9 +774,7 @@ app.post('/mcp', async (c) => {
     return c.json({
       jsonrpc: '2.0',
       id,
-      result: {
-        tools: MCP_TOOLS
-      }
+      result: { tools: MCP_TOOLS }
     })
   }
 
@@ -659,21 +859,26 @@ app.post('/mcp', async (c) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                status: 'payment_required',
-                message: 'Payment required via x402. Sign the challenge and call the tool again with paymentSignature.',
-                challenge: challenge,
-                amount: config.amount,
-                amountUsd:
-                  cleanName === 'get_market_data'
-                    ? '0.002'
-                    : cleanName === 'check_token_safety'
-                      ? '0.04'
-                      : '0.01',
-                network: NETWORK,
-                asset: USDC_BASE,
-                payTo: PAY_TO
-              }, null, 2)
+              text: JSON.stringify(
+                {
+                  status: 'payment_required',
+                  message:
+                    'Payment required via x402. Sign the challenge and call the tool again with paymentSignature.',
+                  challenge,
+                  amount: config.amount,
+                  amountUsd:
+                    cleanName === 'get_market_data'
+                      ? '0.002'
+                      : cleanName === 'check_token_safety'
+                        ? '0.04'
+                        : '0.01',
+                  network: NETWORK,
+                  asset: USDC_BASE,
+                  payTo: PAY_TO
+                },
+                null,
+                2
+              )
             }
           ],
           isError: false
@@ -689,7 +894,12 @@ app.post('/mcp', async (c) => {
         parsedPayload = JSON.parse(paymentSignature)
       }
 
-      const requirements = createChallenge(`mcp:${cleanName}`, config.amount, config.description, true).accepts[0]
+      const requirements = createChallenge(
+        `mcp:${cleanName}`,
+        config.amount,
+        config.description,
+        true
+      ).accepts[0]
 
       const verifyResult = await callFacilitator(c.env, '/platform/v2/x402/verify', {
         x402Version: 2,
@@ -734,18 +944,22 @@ app.post('/mcp', async (c) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({
-                status: 'success',
-                tool: cleanName,
-                data: toolData,
-                settlement: {
-                  success: true,
-                  transaction: settleResult.transaction || settleResult.paymentResponse || null,
-                  payer: verifyResult.payer || null,
-                  amount: config.amount,
-                  network: NETWORK
-                }
-              }, null, 2)
+              text: JSON.stringify(
+                {
+                  status: 'success',
+                  tool: cleanName,
+                  data: toolData,
+                  settlement: {
+                    success: true,
+                    transaction: settleResult.transaction || settleResult.paymentResponse || null,
+                    payer: verifyResult.payer || null,
+                    amount: config.amount,
+                    network: NETWORK
+                  }
+                },
+                null,
+                2
+              )
             }
           ],
           isError: false
@@ -772,14 +986,13 @@ app.post('/mcp', async (c) => {
 })
 
 // ======================================================
-// Existing REST Routes
+// REST Routes
 // ======================================================
-
 app.get('/', (c) => {
   return c.json({
     status: 'ok',
     message: 'x402 Finance Paid API is live!',
-    version: '2.2.0',
+    version: '2.3.0',
     protocol: 'x402-v2 + MCP'
   })
 })
@@ -800,7 +1013,8 @@ app.get('/.well-known/x402.json', (c) => {
       {
         path: '/api/token-safety',
         method: 'GET',
-        description: 'Token safety, honeypot, tax & liquidity analysis on Base',
+        description:
+          'Token safety: honeypot, tax, liquidity, ownership. Returns risk_score, recommendation, data_quality.',
         price: { amount: PRICE_SAFETY, asset: 'USDC', network: 'Base' },
         status: 'live',
         query: { address: '0x... token contract on Base' }
@@ -823,7 +1037,7 @@ app.get('/llms.txt', (c) => {
 
 ## Status
 - **Market Data**: LIVE ($0.002 USDC)
-- **Token Safety**: LIVE ($0.04 USDC) — GoPlus + DexScreener
+- **Token Safety**: LIVE ($0.04 USDC) — GoPlus + Honeypot.is + DexScreener
 - **Holder Clusters**: Coming soon (not accepting payments yet)
 
 ## Base URL
@@ -837,6 +1051,7 @@ Live USD prices for BTC, ETH, SOL, VIRTUAL, AERO, cbBTC.
 
 ### GET /api/token-safety?address=0x...
 Honeypot / tax / liquidity / ownership analysis for a Base token.
+Returns: risk_score (0-100), risk_level, recommendation (avoid | high_caution | proceed_with_caution | insufficient_data), data_quality (full | security_only | liquidity_only), checks, liquidity, summary.
 **Price:** 0.04 USDC (40000 atomic units)
 **Required query:** address (0x + 40 hex chars)
 
@@ -869,13 +1084,13 @@ Honeypot / tax / liquidity / ownership analysis for a Base token.
 app.get('/mcp-tools.json', (c) => {
   return c.json({
     name: 'x402-finance',
-    version: '2.2.0',
+    version: '2.3.0',
     description: 'x402-powered financial tools on Base Mainnet. LIVE: get_market_data + check_token_safety.',
     protocol: 'x402-v2',
     network: NETWORK,
     asset: USDC_BASE,
     payTo: PAY_TO,
-    baseUrl: 'https://x402-paid-api.x402-finance.workers.dev',
+    baseUrl: WORKER_ORIGIN,
     tools: MCP_TOOLS.map((t) => ({
       ...t,
       status: LIVE_MCP_TOOLS.has(t.name) ? 'live' : 'coming_soon',

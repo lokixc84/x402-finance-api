@@ -12,7 +12,7 @@ No API keys. Agents pay per call.
 |-------|-------|--------|
 | `GET /api/paid-content` | $0.002 USDC | LIVE |
 | `GET /api/token-safety?address=0x...` | $0.04 USDC | LIVE |
-| `GET /api/holder-clusters?address=0x...` | $0.01 USDC | LIVE |
+| `GET /api/holder-clusters?address=0x...` | $0.01 USDC | Coming soon |
 
 ## Discovery
 

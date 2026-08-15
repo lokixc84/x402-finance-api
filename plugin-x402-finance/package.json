@@ -1,0 +1,46 @@
+{
+    "name": "plugin-x402-finance",
+    "version": "1.0.0",
+    "description": "ElizaOS plugin: Base token safety (honeypot/tax/liquidity) via x402 Finance — pay-per-call USDC, no API key",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        }
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "scripts": {
+        "build": "tsup src/index.ts --format esm --dts --clean"
+    },
+    "keywords": [
+        "elizaos",
+        "plugin",
+        "x402",
+        "token-safety",
+        "honeypot",
+        "base"
+    ],
+    "license": "MIT",
+    "dependencies": {
+        "@x402/evm": "^2.20.0",
+        "@x402/fetch": "^2.20.0",
+        "plugin-x402-finance": "^1.0.0",
+        "viem": "^2.30.0"
+    },
+    "peerDependencies": {
+        "@elizaos/core": "*"
+    },
+    "devDependencies": {
+        "@elizaos/core": "^1.0.0",
+        "dotenv": "^17.4.2",
+        "tsup": "^8.0.0",
+        "tsx": "^4.23.12",
+        "typescript": "^5.6.0"
+    }
+}

@@ -101,7 +101,8 @@ function createChallenge(resource: string, amount: string, description: string, 
               data: {
                 risk_score: 18,
                 risk_level: 'Low',
-                recommendation: 'proceed_with_caution'
+                recommendation: 'proceed_with_caution',
+                agent_action: 'allow'
               }
             }
           }
@@ -163,6 +164,22 @@ async function callFacilitator(
   throw lastError || new Error(`Facilitator ${path} failed`)
 }
 
+/** Fail-closed: never serve paid data without confirmed settlement (free-shopping guard). */
+function assertSettlementSuccess(settleResult: any): void {
+  const hasTx =
+    typeof settleResult?.transaction === 'string' && settleResult.transaction.length > 0
+  const ok = settleResult?.success === true || hasTx
+  if (!ok) {
+    throw new Error(
+      `Settlement not confirmed: ${settleResult?.errorMessage ||
+      settleResult?.error ||
+      settleResult?.invalidReason ||
+      JSON.stringify(settleResult).slice(0, 180)
+      }`
+    )
+  }
+}
+
 // ======================================================
 // x402 Payment Middleware
 // ======================================================
@@ -222,24 +239,26 @@ function requireX402Payment(amount: string, description: string, includeBazaar =
         })
       }
 
-      if (settleResult.paymentResponse || settleResult.transaction) {
-        c.header(
-          'PAYMENT-RESPONSE',
-          typeof settleResult.paymentResponse === 'string'
-            ? settleResult.paymentResponse
-            : btoa(JSON.stringify(settleResult))
-        )
-      }
+      // Free-shopping guard: no paid payload without confirmed settlement
+      assertSettlementSuccess(settleResult)
+
+      c.header(
+        'PAYMENT-RESPONSE',
+        typeof settleResult.paymentResponse === 'string'
+          ? settleResult.paymentResponse
+          : btoa(JSON.stringify(settleResult))
+      )
       console.log(
         '[PAYMENT SUCCESS] amount=' +
-          amount +
-          ' payer=' +
-          (verifyResult.payer || 'unknown') +
-          ' tx=' +
-          (settleResult.transaction || 'n/a')
+        amount +
+        ' payer=' +
+        (verifyResult.payer || 'unknown') +
+        ' tx=' +
+        (settleResult.transaction || 'n/a')
       )
 
       await next()
+
     } catch (err: any) {
       if (err instanceof HTTPException) throw err
       console.error('Payment middleware error:', err?.message || err)
@@ -276,7 +295,6 @@ async function fetchGoPlus(normalized: string, headers: Record<string, string>, 
         const json = await res.json()
         const data = json?.result?.[normalized] || null
         if (data) return data
-        // Empty result — token unknown to GoPlus; don't retry forever
         console.warn('GoPlus empty result for', normalized)
         return null
       }
@@ -294,7 +312,6 @@ async function fetchGoPlus(normalized: string, headers: Record<string, string>, 
 
 async function fetchHoneypotIs(normalized: string, headers: Record<string, string>) {
   try {
-    // Base = chainID 8453; API key not required at time of writing
     const res = await fetch(
       `https://api.honeypot.is/v2/IsHoneypot?address=${normalized}&chainID=8453`,
       { headers, signal: AbortSignal.timeout(9000) }
@@ -399,14 +416,13 @@ async function analyzeTokenSafety(address: string) {
     const hp = honeypot.honeypotResult?.isHoneypot
     if (typeof hp === 'boolean') {
       if (isHoneypot === null) isHoneypot = hp
-      else if (hp === true) isHoneypot = true // escalate if either source says honeypot
+      else if (hp === true) isHoneypot = true
     }
     const sim = honeypot.simulationResult
     if (sim) {
       if (buyTax === null && sim.buyTax !== undefined) buyTax = Number(sim.buyTax) || 0
       if (sellTax === null && sim.sellTax !== undefined) sellTax = Number(sim.sellTax) || 0
       if (canSell === null && typeof sim.sellTax === 'number') {
-        // If simulation produced sell tax, sell path exists
         canSell = true
       }
     }
@@ -414,13 +430,17 @@ async function analyzeTokenSafety(address: string) {
   }
 
   const highTax =
-    (buyTax !== null && buyTax > 10) || (sellTax !== null && sellTax > 10) ? true : buyTax === null && sellTax === null ? null : false
+    (buyTax !== null && buyTax > 10) || (sellTax !== null && sellTax > 10)
+      ? true
+      : buyTax === null && sellTax === null
+        ? null
+        : false
 
   const liquidityUsd = dex?.liquidity?.usd ?? null
   const liquidityLocked = goplus?.lp_holder_count ? Number(goplus.lp_holder_count) > 0 : null
 
   // Risk score — only add points for known-bad signals; unknown does not equal safe
-  let risk = 15 // baseline when data is partial
+  let risk = 15
   if (goplus || honeypot) risk = 10
   if (isHoneypot === true) risk += 50
   if (canSell === false) risk += 25
@@ -430,7 +450,7 @@ async function analyzeTokenSafety(address: string) {
   if (isOpenSource === false) risk += 8
   if (liquidityUsd !== null && liquidityUsd < 5000) risk += 12
   if (liquidityUsd !== null && liquidityUsd < 1000) risk += 10
-  if (!goplus && !honeypot) risk += 15 // no security source at all
+  if (!goplus && !honeypot) risk += 15
   risk = Math.min(100, risk)
 
   const risk_level =
@@ -439,7 +459,13 @@ async function analyzeTokenSafety(address: string) {
   const hasSecurity = !!(goplus || honeypot)
   const hasMarket = !!dex
   const data_quality =
-    hasSecurity && hasMarket ? 'full' : hasSecurity ? 'security_only' : hasMarket ? 'liquidity_only' : 'minimal'
+    hasSecurity && hasMarket
+      ? 'full'
+      : hasSecurity
+        ? 'security_only'
+        : hasMarket
+          ? 'liquidity_only'
+          : 'minimal'
 
   // Agent-facing recommendation (explicit, not marketing)
   let recommendation: 'avoid' | 'high_caution' | 'proceed_with_caution' | 'insufficient_data'
@@ -452,6 +478,16 @@ async function analyzeTokenSafety(address: string) {
   } else {
     recommendation = 'proceed_with_caution'
   }
+
+  // Explicit action for autonomous agents
+  const agent_action =
+    recommendation === 'avoid'
+      ? 'block'
+      : recommendation === 'high_caution'
+        ? 'warn'
+        : recommendation === 'insufficient_data'
+          ? 'skip'
+          : 'allow'
 
   const summaryParts: string[] = []
   if (isHoneypot === true) summaryParts.push('Flagged as possible honeypot.')
@@ -471,6 +507,7 @@ async function analyzeTokenSafety(address: string) {
     risk_score: risk,
     risk_level,
     recommendation,
+    agent_action,
     data_quality,
     checks: {
       is_honeypot: isHoneypot,
@@ -690,7 +727,7 @@ const MCP_TOOLS = [
   {
     name: 'check_token_safety',
     description:
-      'Analyze a Base token for honeypot risk, taxes, liquidity and ownership. Returns risk_score, recommendation, and data_quality. Cost: $0.04 USDC via x402. LIVE.',
+      'Analyze a Base token for honeypot risk, taxes, liquidity and ownership. Returns risk_score, recommendation, agent_action (block|warn|allow|skip), and data_quality. Cost: $0.04 USDC via x402. LIVE.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -761,7 +798,7 @@ app.post('/mcp', async (c) => {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'x402-finance', version: '2.3.0' }
+        serverInfo: { name: 'x402-finance', version: '2.3.1' }
       }
     })
   }
@@ -924,6 +961,19 @@ app.post('/mcp', async (c) => {
         paymentRequirements: requirements
       })
 
+      try {
+        assertSettlementSuccess(settleResult)
+      } catch (settleGateErr: any) {
+        return c.json({
+          jsonrpc: '2.0',
+          id,
+          error: {
+            code: -32000,
+            message: settleGateErr.message || 'Payment settlement not confirmed'
+          }
+        })
+      }
+
       let toolData: any
       if (cleanName === 'get_market_data') {
         toolData = await getLiveCryptoPrices()
@@ -992,7 +1042,7 @@ app.get('/', (c) => {
   return c.json({
     status: 'ok',
     message: 'x402 Finance Paid API is live!',
-    version: '2.3.0',
+    version: '2.3.1',
     protocol: 'x402-v2 + MCP'
   })
 })
@@ -1014,7 +1064,7 @@ app.get('/.well-known/x402.json', (c) => {
         path: '/api/token-safety',
         method: 'GET',
         description:
-          'Token safety: honeypot, tax, liquidity, ownership. Returns risk_score, recommendation, data_quality.',
+          'Token safety: honeypot, tax, liquidity, ownership. Returns risk_score, recommendation, agent_action, data_quality.',
         price: { amount: PRICE_SAFETY, asset: 'USDC', network: 'Base' },
         status: 'live',
         query: { address: '0x... token contract on Base' }
@@ -1051,9 +1101,15 @@ Live USD prices for BTC, ETH, SOL, VIRTUAL, AERO, cbBTC.
 
 ### GET /api/token-safety?address=0x...
 Honeypot / tax / liquidity / ownership analysis for a Base token.
-Returns: risk_score (0-100), risk_level, recommendation (avoid | high_caution | proceed_with_caution | insufficient_data), data_quality (full | security_only | liquidity_only), checks, liquidity, summary.
+Returns: risk_score (0-100), risk_level, recommendation (avoid | high_caution | proceed_with_caution | insufficient_data), agent_action (block | warn | allow | skip), data_quality (full | security_only | liquidity_only | minimal), checks, liquidity, summary.
 **Price:** 0.04 USDC (40000 atomic units)
 **Required query:** address (0x + 40 hex chars)
+
+**agent_action guide for agents:**
+- block → do not trade
+- warn → elevated risk, human or policy review
+- allow → proceed with normal caution
+- skip → insufficient data, do not treat as safe
 
 **Network:** Base Mainnet (eip155:8453)
 **Asset:** USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
@@ -1084,7 +1140,7 @@ Returns: risk_score (0-100), risk_level, recommendation (avoid | high_caution | 
 app.get('/mcp-tools.json', (c) => {
   return c.json({
     name: 'x402-finance',
-    version: '2.3.0',
+    version: '2.3.1',
     description: 'x402-powered financial tools on Base Mainnet. LIVE: get_market_data + check_token_safety.',
     protocol: 'x402-v2',
     network: NETWORK,
@@ -1134,8 +1190,8 @@ app.get(
   },
   requireX402Payment(PRICE_SAFETY, 'Token safety analysis', true),
   async (c) => {
+    const address = c.req.query('address')!
     try {
-      const address = c.req.query('address')!
       const report = await analyzeTokenSafety(address)
       return c.json({
         success: true,
@@ -1143,9 +1199,54 @@ app.get(
         data: report
       })
     } catch (err: any) {
-      console.error('Token safety failed:', err)
-      throw new HTTPException(502, {
-        message: 'Failed to analyze token safety'
+      console.error('Token safety failed after payment:', err?.message || err)
+      // Paid users must never get a bare 502 — return structured insufficient data
+      return c.json({
+        success: true,
+        message: 'Token safety analysis (payment verified; upstream partial failure)',
+        data: {
+          address: address.toLowerCase(),
+          chain: 'base',
+          chainId: 8453,
+          risk_score: 50,
+          risk_level: 'Medium',
+          recommendation: 'insufficient_data',
+          agent_action: 'skip',
+          data_quality: 'minimal',
+          checks: {
+            is_honeypot: null,
+            can_sell: null,
+            high_tax: null,
+            buy_tax_pct: null,
+            sell_tax_pct: null,
+            liquidity_locked: null,
+            ownership_renounced: null,
+            proxy_contract: null,
+            open_source: null,
+            mintable: null
+          },
+          liquidity: {
+            usd_value: null,
+            pair: null,
+            dex: null,
+            pair_address: null,
+            volume_24h: null,
+            price_usd: null
+          },
+          contract: {
+            verified: null,
+            owner: null,
+            creator: null,
+            holder_count: null
+          },
+          summary:
+            'Upstream security/liquidity providers failed after payment. Do not treat this as a clean bill of health.',
+          analyzed_at: new Date().toISOString(),
+          source: { security: null, security_secondary: null, market: null },
+          cached: false,
+          stale: false,
+          upstream_error: true
+        }
       })
     }
   }
